@@ -12,8 +12,11 @@ locals {
   channel = var.release != null && !can(regex("^v[0-9]", coalesce(var.release, "v0"))) ? var.release : null
   pinned  = local.channel == null ? var.release : null
   # A pinned release's images, from Demiurge's registry, unless images are named outright; a channel's come from the VM.
-  harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${var.image_registry}/demiurge-harness:${local.pinned}")
-  web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${var.image_registry}/demiurge-web:${local.pinned}")
+  # Built here (build_here): the customer's own registry and channel, from its mirror; else Demiurge's.
+  registry      = var.build_here ? "${var.region}-docker.pkg.dev/${var.project}/${local.name}" : var.image_registry
+  channels      = var.build_here ? "gs://${var.project}-demiurge-channels/channels" : var.channels
+  harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness:${local.pinned}")
+  web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${local.registry}/demiurge-web:${local.pinned}")
   services = ["compute.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
   "iap.googleapis.com", "artifactregistry.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com"]
 }
@@ -279,8 +282,8 @@ resource "google_compute_instance" "main" {
       INSTANCE_NAME="${local.instance}"
       RELEASE="${local.pinned == null ? "" : local.pinned}"
       CHANNEL="${local.channel == null ? "" : local.channel}"
-      CHANNELS="${var.channels}"
-      IMAGE_REGISTRY="${var.image_registry}"
+      CHANNELS="${local.channels}"
+      IMAGE_REGISTRY="${local.registry}"
       HARNESS_IMAGE="${local.harness_image}"
       WEB_IMAGE="${local.web_image}"
       SECRETS="gcp"
@@ -441,10 +444,9 @@ resource "google_compute_global_forwarding_rule" "http" {
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
-# ---------- the release's images come from Demiurge's own registry (var.image_registry), which grants this VM's
-# service account read access; nothing here holds a credential for it.
-
-# For images copied here by hand or by an older infra repository (harness_image and web_image).
+# ---------- the release's images: from Demiurge's own registry (var.image_registry), which grants this VM's service
+# account read access, or, with build_here, from this registry, where the customer's mirror builds them
+# (.github/workflows/customer-build.yml), following a channel in this project. Also for images copied in by hand.
 
 resource "google_artifact_registry_repository" "main" {
   repository_id = local.name
@@ -458,6 +460,38 @@ resource "google_artifact_registry_repository" "main" {
       keep_count = 10
     }
   }
+}
+
+resource "google_storage_bucket" "channels" {
+  count                       = var.build_here ? 1 : 0
+  name                        = "${var.project}-demiurge-channels"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  public_access_prevention    = "enforced"
+  depends_on                  = [google_project_service.used]
+}
+
+resource "google_storage_bucket_iam_member" "channels_vm" {
+  count  = var.build_here ? 1 : 0
+  bucket = google_storage_bucket.channels[0].name
+  role   = "roles/storage.objectViewer"
+  member = "serviceAccount:${google_service_account.vm.email}"
+}
+
+# The customer's build identity: pushes images to this registry and moves the channel, and nothing else here.
+resource "google_artifact_registry_repository_iam_member" "builders" {
+  for_each   = var.build_here ? toset(var.builders) : toset([])
+  location   = google_artifact_registry_repository.main.location
+  repository = google_artifact_registry_repository.main.name
+  role       = "roles/artifactregistry.writer"
+  member     = each.value
+}
+
+resource "google_storage_bucket_iam_member" "builders" {
+  for_each = var.build_here ? toset(var.builders) : toset([])
+  bucket   = google_storage_bucket.channels[0].name
+  role     = "roles/storage.objectAdmin"
+  member   = each.value
 }
 
 # ---------- Convex's nightly exports
