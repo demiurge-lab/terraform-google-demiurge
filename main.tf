@@ -12,7 +12,7 @@ locals {
   channel = var.release != null && !can(regex("^v[0-9]", coalesce(var.release, "v0"))) ? var.release : null
   pinned  = local.channel == null ? var.release : null
   # A pinned release's images, from Demiurge's registry, unless images are named outright; a channel's come from the VM.
-  # Built here (build_here): the customer's own registry and channel, from its mirror; else Demiurge's.
+  # Built here (build_here): the customer's own registry and channel; else Demiurge's.
   registry      = var.build_here ? "${var.region}-docker.pkg.dev/${var.project}/${local.name}" : var.image_registry
   channels      = var.build_here ? "gs://${var.project}-demiurge-channels/channels" : var.channels
   harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness:${local.pinned}")
@@ -445,8 +445,8 @@ resource "google_compute_global_forwarding_rule" "http" {
 }
 
 # ---------- the release's images: from Demiurge's own registry (var.image_registry), which grants this VM's service
-# account read access, or, with build_here, from this registry, where the customer's mirror builds them
-# (.github/workflows/customer-build.yml), following a channel in this project. Also for images copied in by hand.
+# account read access, or, with build_here, from this registry, where the customer builds them, following a channel in
+# this project. Also for images copied in by hand.
 
 resource "google_artifact_registry_repository" "main" {
   repository_id = local.name

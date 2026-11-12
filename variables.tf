@@ -42,13 +42,13 @@ variable "release" {
 }
 
 variable "build_here" {
-  description = "Build the images in this project instead of using Demiurge's: the customer's mirror of Demiurge builds each release into this project's registry and moves a channel in its bucket (.github/workflows/customer-build.yml), so the VM runs only what the customer built from code it holds."
+  description = "Build the images in this project instead of using Demiurge's: the customer builds each release, from its own copy of Demiurge, into this project's registry and moves a channel in its bucket, so the VM runs only what the customer built from code it holds."
   type        = bool
   default     = false
 }
 
 variable "builders" {
-  description = "With build_here: the identities that build (IAM members, e.g. serviceAccount:<the mirror's build account>), granted write on this registry and the channel bucket."
+  description = "With build_here: the identities that build (IAM members, e.g. serviceAccount:<the customer's build account>), granted write on this registry and the channel bucket."
   type        = list(string)
   default     = []
 }

@@ -18,7 +18,7 @@ output "reader_email" {
 }
 
 output "registry" {
-  description = "This project's registry: CUSTOMER_REGISTRY for the mirror's build with build_here, or where images named with harness_image and web_image are copied."
+  description = "This project's registry: where the customer's build pushes with build_here, or where images named with harness_image and web_image are copied."
   value       = "${var.region}-docker.pkg.dev/${var.project}/${google_artifact_registry_repository.main.repository_id}"
 }
 
@@ -28,7 +28,7 @@ output "vm_service_account" {
 }
 
 output "channels" {
-  description = "With build_here: CUSTOMER_CHANNELS for the mirror's build; else Demiurge's channels."
+  description = "With build_here: the channels the customer's build moves; else Demiurge's channels."
   value       = local.channels
 }
 
