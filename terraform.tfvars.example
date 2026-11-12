@@ -1,0 +1,8 @@
+project       = "acme-demiurge"
+region        = "us-central1"
+zone          = "us-central1-a"
+domain        = "demiurge.acme.example"
+org_name      = "Acme"
+timezone      = "America/Los_Angeles"
+spend_ceiling = 2000
+release       = "stable"
