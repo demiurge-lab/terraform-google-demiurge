@@ -7,7 +7,7 @@ locals {
   name = "demiurge"
   # With tunnel, Convex is served from the page's own name under /api/, so one Access cookie covers both.
   api      = var.tunnel ? var.domain : "api.${var.domain}"
-  site     = "site.${var.domain}"
+  site     = coalesce(var.site_domain, "site.${var.domain}")
   instance = "demiurge" # Convex's instance; its database is named after it
   lb       = !var.tunnel
   # A release (v…) pins the deployment; anything else names a channel the VM follows, resolving it itself (follow.sh).

@@ -21,8 +21,14 @@ variable "zone" {
 }
 
 variable "domain" {
-  description = "The page's name, e.g. demiurge.acme.example; api.<domain> and site.<domain> are Convex's."
+  description = "The page's name, e.g. demiurge.acme.example; api.<domain> and site.<domain> (or site_domain) are Convex's."
   type        = string
+}
+
+variable "site_domain" {
+  description = "The name for Convex's HTTP actions (Slack's events, the sign-in callbacks, the key set), if not site.<domain>. Behind Cloudflare's proxy, give a first-level name such as demiurge-site.acme.example: Universal SSL covers only one level below the zone."
+  type        = string
+  default     = null
 }
 
 variable "org_name" {
