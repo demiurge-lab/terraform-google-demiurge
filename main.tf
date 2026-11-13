@@ -1,13 +1,15 @@
 # An organisation's Demiurge on its own GCP project (docs/deploy.md): one VM running Convex and the intellects, Cloud SQL
-# for Convex's data, one HTTPS load balancer as the only way in, Secret Manager, and a bucket for Convex's exports.
+# for Convex's data, one HTTPS load balancer (or a Cloudflare Tunnel) as the only way in, Secret Manager, and a bucket for Convex's exports.
 # No secret value passes through Terraform's state: the database password is ephemeral and write-only, and every other
 # secret is made on the VM by demiurge-admin.
 
 locals {
-  name     = "demiurge"
-  api      = "api.${var.domain}"
+  name = "demiurge"
+  # With tunnel, Convex is served from the page's own name under /api/, so one Access cookie covers both.
+  api      = var.tunnel ? var.domain : "api.${var.domain}"
   site     = "site.${var.domain}"
   instance = "demiurge" # Convex's instance; its database is named after it
+  lb       = !var.tunnel
   # A release (v…) pins the deployment; anything else names a channel the VM follows, resolving it itself (follow.sh).
   channel = var.release != null && !can(regex("^v[0-9]", coalesce(var.release, "v0"))) ? var.release : null
   pinned  = local.channel == null ? var.release : null
@@ -67,6 +69,7 @@ resource "google_compute_router_nat" "main" {
 
 # Only Google's load balancer and health checks reach the page and Convex; only IAP reaches SSH.
 resource "google_compute_firewall" "load_balancer" {
+  count         = local.lb ? 1 : 0
   name          = "${local.name}-load-balancer"
   network       = google_compute_network.main.id
   source_ranges = ["130.211.0.0/22", "35.191.0.0/16"]
@@ -204,10 +207,11 @@ resource "google_project_iam_member" "vm_secrets" {
 data "google_project" "this" {}
 
 resource "google_compute_disk" "data" {
-  name = "${local.name}-data"
-  type = "pd-balanced"
-  zone = var.zone
-  size = var.data_disk_gb
+  name       = "${local.name}-data"
+  type       = "pd-balanced"
+  zone       = var.zone
+  size       = var.data_disk_gb
+  depends_on = [google_project_service.used]
 }
 
 resource "google_compute_resource_policy" "snapshots" {
@@ -225,6 +229,7 @@ resource "google_compute_resource_policy" "snapshots" {
       on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"
     }
   }
+  depends_on = [google_project_service.used]
 }
 
 resource "google_compute_disk_resource_policy_attachment" "snapshots" {
@@ -272,6 +277,7 @@ resource "google_compute_instance" "main" {
     # Where the VM says how its last move onto a release went (follow.sh), for deploys to wait on.
     enable-guest-attributes = "TRUE"
     demiurge-follow         = file("${path.module}/follow.sh")
+    demiurge-tunnel         = var.tunnel ? "1" : ""
     # The deployment's settings, as demiurge-admin reads them. None is a secret.
     deployment-env = <<-ENV
       ORG_NAME="${var.org_name}"
@@ -279,6 +285,7 @@ resource "google_compute_instance" "main" {
       SITE_URL="https://${var.domain}"
       CONVEX_CLOUD_ORIGIN="https://${local.api}"
       CONVEX_SITE_ORIGIN="https://${local.site}"
+      DASHBOARD_DEPLOYMENT_URL="${var.tunnel ? "http://127.0.0.1:3210" : ""}"
       INSTANCE_NAME="${local.instance}"
       RELEASE="${local.pinned == null ? "" : local.pinned}"
       CHANNEL="${local.channel == null ? "" : local.channel}"
@@ -294,7 +301,7 @@ resource "google_compute_instance" "main" {
       DO_NOT_REQUIRE_SSL=1
       DB_USER="${google_sql_user.convex.name}"
       LOCAL_DB=0
-      BIND="0.0.0.0"
+      BIND="${var.tunnel ? "127.0.0.1" : "0.0.0.0"}"
       EXPORTS_BUCKET="${var.project}-demiurge-exports"
       SPEND_CEILING="${var.spend_ceiling == null ? "" : var.spend_ceiling}"
     ENV
@@ -312,6 +319,7 @@ resource "google_compute_instance" "main" {
 }
 
 resource "google_compute_instance_group" "main" {
+  count     = local.lb ? 1 : 0
   name      = local.name
   zone      = var.zone
   instances = [google_compute_instance.main.id]
@@ -332,7 +340,9 @@ resource "google_compute_instance_group" "main" {
 # ---------- the load balancer: the only way in
 
 resource "google_compute_global_address" "main" {
-  name = local.name
+  count      = local.lb ? 1 : 0
+  name       = local.name
+  depends_on = [google_project_service.used]
 }
 
 locals {
@@ -344,17 +354,18 @@ locals {
 }
 
 resource "google_compute_health_check" "main" {
-  for_each = local.backends
+  for_each = local.lb ? local.backends : {}
   name     = "${local.name}-${each.key}"
   http_health_check {
     port_name          = each.value.port
     port_specification = "USE_NAMED_PORT"
     request_path       = each.value.path
   }
+  depends_on = [google_project_service.used]
 }
 
 resource "google_compute_backend_service" "main" {
-  for_each              = local.backends
+  for_each              = local.lb ? local.backends : {}
   name                  = "${local.name}-${each.key}"
   protocol              = "HTTP"
   port_name             = each.value.port
@@ -362,7 +373,7 @@ resource "google_compute_backend_service" "main" {
   load_balancing_scheme = "EXTERNAL_MANAGED"
   health_checks         = [google_compute_health_check.main[each.key].id]
   backend {
-    group           = google_compute_instance_group.main.id
+    group           = google_compute_instance_group.main[0].id
     balancing_mode  = "UTILIZATION"
     capacity_scaler = 1
   }
@@ -372,6 +383,7 @@ resource "google_compute_backend_service" "main" {
 }
 
 resource "google_compute_url_map" "main" {
+  count           = local.lb ? 1 : 0
   name            = local.name
   default_service = google_compute_backend_service.main["web"].id
   host_rule {
@@ -390,56 +402,66 @@ resource "google_compute_url_map" "main" {
     name            = "site"
     default_service = google_compute_backend_service.main["site"].id
   }
+  depends_on = [google_project_service.used]
 }
 
 # A generated name, replaced before the old one goes, so the load balancer is never without one: a certificate checked
 # before its names pointed here stays unverified until Google next looks, and a fresh one is looked at at once.
 resource "random_id" "certificate" {
+  count       = local.lb ? 1 : 0
   byte_length = 3
   keepers     = { domains = join(",", [var.domain, local.api, local.site]), round = var.certificate_round }
 }
 
 resource "google_compute_managed_ssl_certificate" "main" {
-  name = "${local.name}-${random_id.certificate.hex}"
+  count = local.lb ? 1 : 0
+  name  = "${local.name}-${random_id.certificate[0].hex}"
   managed {
     domains = [var.domain, local.api, local.site]
   }
   lifecycle {
     create_before_destroy = true
   }
+  depends_on = [google_project_service.used]
 }
 
 resource "google_compute_target_https_proxy" "main" {
+  count            = local.lb ? 1 : 0
   name             = local.name
-  url_map          = google_compute_url_map.main.id
-  ssl_certificates = [google_compute_managed_ssl_certificate.main.id]
+  url_map          = google_compute_url_map.main[0].id
+  ssl_certificates = [google_compute_managed_ssl_certificate.main[0].id]
 }
 
 resource "google_compute_global_forwarding_rule" "https" {
+  count                 = local.lb ? 1 : 0
   name                  = "${local.name}-https"
-  target                = google_compute_target_https_proxy.main.id
-  ip_address            = google_compute_global_address.main.id
+  target                = google_compute_target_https_proxy.main[0].id
+  ip_address            = google_compute_global_address.main[0].id
   port_range            = "443"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
 
 resource "google_compute_url_map" "redirect" {
-  name = "${local.name}-redirect"
+  count = local.lb ? 1 : 0
+  name  = "${local.name}-redirect"
   default_url_redirect {
     https_redirect = true
     strip_query    = false
   }
+  depends_on = [google_project_service.used]
 }
 
 resource "google_compute_target_http_proxy" "redirect" {
+  count   = local.lb ? 1 : 0
   name    = "${local.name}-redirect"
-  url_map = google_compute_url_map.redirect.id
+  url_map = google_compute_url_map.redirect[0].id
 }
 
 resource "google_compute_global_forwarding_rule" "http" {
+  count                 = local.lb ? 1 : 0
   name                  = "${local.name}-http"
-  target                = google_compute_target_http_proxy.redirect.id
-  ip_address            = google_compute_global_address.main.id
+  target                = google_compute_target_http_proxy.redirect[0].id
+  ip_address            = google_compute_global_address.main[0].id
   port_range            = "80"
   load_balancing_scheme = "EXTERNAL_MANAGED"
 }
@@ -515,4 +537,71 @@ resource "google_storage_bucket_iam_member" "exports" {
   bucket = google_storage_bucket.exports.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.vm.email}"
+}
+
+# ---------- with tunnel: the way in instead of the load balancer. The caller makes the tunnel, its routes and DNS, and
+# writes the tunnel's token here as a new version; the VM runs cloudflared with it, and nothing listens off the VM.
+
+resource "google_secret_manager_secret" "tunnel_token" {
+  count     = var.tunnel ? 1 : 0
+  secret_id = "demiurge-tunnel-token"
+  replication {
+    auto {}
+  }
+  depends_on = [google_project_service.used]
+}
+
+moved {
+  from = google_compute_firewall.load_balancer
+  to   = google_compute_firewall.load_balancer[0]
+}
+
+moved {
+  from = google_compute_instance_group.main
+  to   = google_compute_instance_group.main[0]
+}
+
+moved {
+  from = google_compute_global_address.main
+  to   = google_compute_global_address.main[0]
+}
+
+moved {
+  from = google_compute_url_map.main
+  to   = google_compute_url_map.main[0]
+}
+
+moved {
+  from = random_id.certificate
+  to   = random_id.certificate[0]
+}
+
+moved {
+  from = google_compute_managed_ssl_certificate.main
+  to   = google_compute_managed_ssl_certificate.main[0]
+}
+
+moved {
+  from = google_compute_target_https_proxy.main
+  to   = google_compute_target_https_proxy.main[0]
+}
+
+moved {
+  from = google_compute_global_forwarding_rule.https
+  to   = google_compute_global_forwarding_rule.https[0]
+}
+
+moved {
+  from = google_compute_url_map.redirect
+  to   = google_compute_url_map.redirect[0]
+}
+
+moved {
+  from = google_compute_target_http_proxy.redirect
+  to   = google_compute_target_http_proxy.redirect[0]
+}
+
+moved {
+  from = google_compute_global_forwarding_rule.http
+  to   = google_compute_global_forwarding_rule.http[0]
 }

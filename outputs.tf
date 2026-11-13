@@ -1,10 +1,15 @@
 output "ip_address" {
-  description = "Point the page's name and its api. and site. names here; the certificate is issued once all three resolve."
-  value       = google_compute_global_address.main.address
+  description = "Without tunnel: point the page's name and its api. and site. names here; the certificate is issued once all three resolve."
+  value       = local.lb ? google_compute_global_address.main[0].address : null
+}
+
+output "tunnel_secret" {
+  description = "With tunnel: the secret to write the tunnel's token to, as a new version."
+  value       = var.tunnel ? google_secret_manager_secret.tunnel_token[0].id : null
 }
 
 output "names" {
-  value = [var.domain, local.api, local.site]
+  value = distinct([var.domain, local.api, local.site])
 }
 
 output "vm" {

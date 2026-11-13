@@ -81,8 +81,33 @@ ExecStart=/usr/local/lib/demiurge-follow.sh follow
 Restart=always
 RestartSec=30
 UNIT
+# With the module's tunnel: cloudflared is the only way in, with the token the caller wrote to Secret Manager.
+if [ "$(metadata demiurge-tunnel 2>/dev/null || true)" = 1 ]; then
+  install -d -m 700 /etc/demiurge
+  until token=$(gcloud secrets versions access latest --secret demiurge-tunnel-token 2>/dev/null) && [ -n "$token" ]; do
+    echo "waiting for the tunnel's token in demiurge-tunnel-token"
+    sleep 30
+  done
+  printf 'TUNNEL_TOKEN=%s\n' "$token" > /etc/demiurge/tunnel.env
+  chmod 600 /etc/demiurge/tunnel.env
+  unset token
+  cat > /etc/systemd/system/demiurge-tunnel.service <<UNIT
+[Unit]
+Description=Cloudflare Tunnel to the page and Convex
+Requires=docker.service
+After=docker.service
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f demiurge-tunnel
+ExecStart=/usr/bin/docker run --rm --name demiurge-tunnel --network host --cap-drop ALL --security-opt no-new-privileges --env-file /etc/demiurge/tunnel.env cloudflare/cloudflared:2026.10.0@sha256:9b49eed8f62806d5d45ddf59ecefb5710429598ea6d3fcccd2af938f621b2b07 tunnel --no-autoupdate run
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+UNIT
+fi
 systemctl daemon-reload
 systemctl enable --now demiurge-export.timer
+[ ! -f /etc/systemd/system/demiurge-tunnel.service ] || systemctl enable --now demiurge-tunnel.service
 
 # Started only once set up: `demiurge-admin init` makes the keys the services need.
 if [ -f /srv/demiurge/.initialized ]; then

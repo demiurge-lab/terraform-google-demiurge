@@ -32,5 +32,9 @@ module "demiurge" {
 - **Built here:** with `build_here = true`, the VM reads images from this project's registry (the `registry` output)
   and its channel from a bucket here (the `channels` output) instead of Demiurge's. The organisation's own CI builds each
   release from its vendored copy into them, as one of `builders`, which are granted write on both.
+- **Tunnel:** with `tunnel = true`, a Cloudflare Tunnel is the way in instead of the load balancer. Make the tunnel, its
+  routes (on the domain, `/api/` paths to `http://127.0.0.1:3210` and the rest to `:8080`; `site.` to `:3211`) and
+  DNS yourself, and write its token as a version of the `tunnel_secret` output; `ip_address` is then null. Convex is
+  then served from the domain itself, not `api.`, so an Access application on the domain covers the page and Convex.
 - **The provider** is passed in, configured for `project`; the module refuses one for another project.
 - **DNS:** point `domain` and its `api.` and `site.` names at the `ip_address` output, as A records without a proxy.

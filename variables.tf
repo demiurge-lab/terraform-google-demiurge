@@ -105,3 +105,9 @@ variable "certificate_round" {
   type        = number
   default     = 1
 }
+
+variable "tunnel" {
+  description = "Reach the deployment through a Cloudflare Tunnel instead of a load balancer: no public address, certificate or load balancer. The caller makes the tunnel (routes: the domain's /api/ paths to http://127.0.0.1:3210 and the rest to :8080, site. to :3211; Convex is served from the page's own name, so one Access cookie covers both) and its DNS, and writes its token to the tunnel_secret output; the VM runs cloudflared with it."
+  type        = bool
+  default     = false
+}
