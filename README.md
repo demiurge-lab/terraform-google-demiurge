@@ -38,5 +38,8 @@ module "demiurge" {
   null. Convex is then served from the domain itself, not `api.`, so an Access application on the domain covers the
   page and Convex. Behind Cloudflare's proxy, set `site_domain` to a first-level name: Universal SSL covers only one
   level below the zone.
+- **Sign-in:** with `oidc`, people also sign in through the organisation's own provider, so nobody needs Slack to
+  reach the page. Behind a tunnel with Access, an Access for SaaS application is that provider: the same Access login
+  signs them in. Write its client secret as a version of `demiurge-oidc-client-secret` here.
 - **The provider** is passed in, configured for `project`; the module refuses one for another project.
 - **DNS:** point `domain` and its `api.` and `site.` names at the `ip_address` output, as A records without a proxy.

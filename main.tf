@@ -304,6 +304,9 @@ resource "google_compute_instance" "main" {
       BIND="${var.tunnel ? "127.0.0.1" : "0.0.0.0"}"
       EXPORTS_BUCKET="${var.project}-demiurge-exports"
       SPEND_CEILING="${var.spend_ceiling == null ? "" : var.spend_ceiling}"
+      OIDC_ISSUER="${var.oidc == null ? "" : var.oidc.issuer}"
+      OIDC_CLIENT_ID="${var.oidc == null ? "" : var.oidc.client_id}"
+      SIGNUP="${try(var.oidc.open_signup, false) ? "open" : ""}"
     ENV
   }
   metadata_startup_script = file("${path.module}/startup.sh")
