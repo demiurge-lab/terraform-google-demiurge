@@ -107,11 +107,12 @@ variable "spend_ceiling" {
 }
 
 variable "oidc" {
-  description = "The organisation's own sign-in over OIDC, beside Sign in with Slack: its issuer and client id (Google Workspace, Okta, Entra, or Cloudflare Access for SaaS, whose issuer ends in /cdn-cgi/access/sso/oidc/<client id>). A client secret, if the provider wants one, goes in Secret Manager here as demiurge-oidc-client-secret. open_signup lets in anyone it vouches for without an invitation, for a provider limited to the organisation."
+  description = "The organisation's own sign-in over OIDC, beside Sign in with Slack: its issuer and client id (Google Workspace, Okta, Entra, or Cloudflare Access for SaaS, whose issuer ends in /cdn-cgi/access/sso/oidc/<client id>). A client secret, if the provider wants one, goes in Secret Manager here as demiurge-oidc-client-secret. open_signup lets in anyone it vouches for without an invitation, for a provider limited to the organisation. trust_email takes its email as verified when its tokens don't say (Cloudflare Access; Entra without email_verified), for a provider that checks every email itself."
   type = object({
     issuer      = string
     client_id   = string
     open_signup = optional(bool, false)
+    trust_email = optional(bool, false)
   })
   default = null
 }

@@ -307,6 +307,7 @@ resource "google_compute_instance" "main" {
       OIDC_ISSUER="${var.oidc == null ? "" : var.oidc.issuer}"
       OIDC_CLIENT_ID="${var.oidc == null ? "" : var.oidc.client_id}"
       SIGNUP="${try(var.oidc.open_signup, false) ? "open" : ""}"
+      OIDC_TRUST_EMAIL="${try(var.oidc.trust_email, false) ? "1" : ""}"
     ENV
   }
   metadata_startup_script = file("${path.module}/startup.sh")
