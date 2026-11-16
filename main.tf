@@ -20,7 +20,7 @@ locals {
   harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness:${local.pinned}")
   web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${local.registry}/demiurge-web:${local.pinned}")
   services = ["compute.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
-  "iap.googleapis.com", "artifactregistry.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com"]
+  "iap.googleapis.com", "artifactregistry.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com"]
 }
 
 data "google_client_config" "current" {}
@@ -141,8 +141,10 @@ resource "google_sql_database" "convex" {
   instance = google_sql_database_instance.main.name
 }
 
-# The database password: made here, written to Secret Manager and to Cloud SQL, and kept in neither Terraform's plan
-# nor its state. Bump db_password_version to rotate it.
+# The database password: made here, written to Secret Manager, and kept in neither Terraform's plan nor its state. Cloud
+# SQL gets it read back from Secret Manager rather than from the generator: each apply generates a new value, so an
+# apply that stopped between the two writes would otherwise leave the user and the secret holding different ones.
+# Bump db_password_version to rotate it.
 ephemeral "random_password" "db" {
   length  = 40
   special = false
@@ -167,10 +169,15 @@ resource "google_secret_manager_secret_version" "db_password" {
   secret_data_wo_version = var.db_password_version
 }
 
+ephemeral "google_secret_manager_secret_version" "db_password" {
+  secret  = google_secret_manager_secret.db_password.id
+  version = google_secret_manager_secret_version.db_password.version
+}
+
 resource "google_sql_user" "convex" {
   name                = "demiurge"
   instance            = google_sql_database_instance.main.name
-  password_wo         = ephemeral.random_password.db.result
+  password_wo         = ephemeral.google_secret_manager_secret_version.db_password.secret_data
   password_wo_version = var.db_password_version
 }
 
