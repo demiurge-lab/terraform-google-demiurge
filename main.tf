@@ -17,7 +17,7 @@ locals {
   channels      = var.build_here ? "gs://${var.project}-demiurge-channels/channels" : var.channels
   releases      = var.build_here ? "" : var.releases
   release       = one(data.google_storage_bucket_object_content.release[*].content)
-  pinned_by     = local.release == null ? { harness = ":${local.pinned}", web = ":${local.pinned}" } : { for image in ["harness", "web"] : image => "@${split("@", jsondecode(local.release)[image])[1]}" }
+  pinned_by     = local.pinned == null ? null : local.release == null ? { harness = ":${local.pinned}", web = ":${local.pinned}" } : { for image in ["harness", "web"] : image => "@${split("@", jsondecode(local.release)[image])[1]}" }
   harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness${local.pinned_by.harness}")
   web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${local.registry}/demiurge-web${local.pinned_by.web}")
   services = ["compute.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
