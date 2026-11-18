@@ -21,20 +21,63 @@ LOCK=/run/demiurge-release.lock
 
 attribute() { curl -fsS -H "Metadata-Flavor: Google" "$METADATA/attributes/$1"; }
 
-# The settings with the release they mean: a channel (CHANNEL) is looked up in Demiurge's bucket and its release and
-# images added, so everything after sees a pinned release. Fails when the lookup does.
 resolve() {
-  local from="$1" to="$2" channel channels registry version
-  channel=$(sed -n 's/^ *CHANNEL="\(.*\)"$/\1/p' "$from")
+  local from="$1" to="$2" version harness web releases digests
+  version=$(setting "$from" RELEASE)
+  harness=$(setting "$from" HARNESS_IMAGE)
+  web=$(setting "$from" WEB_IMAGE)
+  releases=$(setting "$from" RELEASES)
   install -m 600 "$from" "$to"
-  [ -n "$channel" ] || return 0
-  channels=$(sed -n 's/^ *CHANNELS="\(.*\)"$/\1/p' "$from")
-  registry=$(sed -n 's/^ *IMAGE_REGISTRY="\(.*\)"$/\1/p' "$from")
-  version=$(gcloud storage cat "$channels/$channel" 2>>"$LOG" | tr -d '[:space:]') || return 1
-  [[ "$version" =~ ^v[0-9][0-9.]*$ ]] || { echo "$(date -Is) channel $channel names \"$version\", not a release" >> "$LOG"; return 1; }
-  printf 'RELEASE="%s"\nHARNESS_IMAGE="%s/demiurge-harness:%s"\nWEB_IMAGE="%s/demiurge-web:%s"\n' \
-    "$version" "$registry" "$version" "$registry" "$version" >> "$to"
+  if [ -n "$(setting "$from" CHANNEL)" ]; then
+    version=$(channel_release "$from") || return 1
+    harness="" web=""
+  fi
+  if [ -z "$harness" ]; then
+    harness="$(setting "$from" IMAGE_REGISTRY)/demiurge-harness:$version"
+    web="$(setting "$from" IMAGE_REGISTRY)/demiurge-web:$version"
+    if [ -n "$releases" ]; then
+      digests=$(release_digests "$releases" "$version") || return 1
+      harness="${harness%:*}@${digests% *}" web="${web%:*}@${digests#* }"
+    fi
+  fi
+  harness=$(tag_to_digest "$harness") && web=$(tag_to_digest "$web") || return 1
+  [ -z "$version" ] || same_digests_as_before "$version" "$harness $web" || return 1
+  settings_name "$from" "$version" "$harness" "$web" ||
+    printf 'RELEASE="%s"\nHARNESS_IMAGE="%s"\nWEB_IMAGE="%s"\n' "$version" "$harness" "$web" >> "$to"
 }
+setting() { sed -n "s/^ *$2=\"\(.*\)\"$/\1/p" "$1"; }
+channel_release() {
+  local channel version
+  channel=$(setting "$1" CHANNEL)
+  version=$(gcloud storage cat "$(setting "$1" CHANNELS)/$channel" 2>>"$LOG" | tr -d '[:space:]') || return 1
+  [[ "$version" =~ ^v[0-9][0-9.]*$ ]] || { echo "$(date -Is) channel $channel names \"$version\", not a release" >> "$LOG"; return 1; }
+  echo "$version"
+}
+release_digests() {
+  gcloud storage cat "$1/$2/release.json" 2>>"$LOG" | python3 -c 'import json, re, sys
+release = json.load(sys.stdin)
+digests = [release[image].rpartition("@")[2] for image in ("harness", "web")]
+if release.get("version") != sys.argv[1] or not all(re.fullmatch("sha256:[0-9a-f]{64}", d) for d in digests):
+    sys.exit("it names another release, or an image without a digest")
+print(*digests)' "$2" 2>>"$LOG" || { echo "$(date -Is) couldn't read $2's digests from $1/$2/release.json" >> "$LOG"; return 1; }
+}
+tag_to_digest() {
+  local digest
+  if [[ "$1" == *@sha256:* ]]; then echo "$1"; return; fi
+  digest=$(gcloud artifacts docker images describe "$1" --format='value(image_summary.digest)' 2>>"$LOG") || return 1
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "$(date -Is) $1 has no digest in its registry" >> "$LOG"; return 1; }
+  echo "${1%:*}@$digest"
+}
+same_digests_as_before() {
+  local record="$DIR/releases/$1"
+  if [ -f "$record" ] && [ "$(cat "$record")" != "$2" ]; then
+    echo "$(date -Is) REFUSED $1: it now names $2, but this VM took it as $(cat "$record"); staying on what runs" | tee -a "$LOG" >&2
+    return 1
+  fi
+  mkdir -p "$DIR/releases"
+  echo "$2" > "$record"
+}
+settings_name() { [ "$2" = "$(setting "$1" RELEASE)" ] && [ "$3" = "$(setting "$1" HARNESS_IMAGE)" ] && [ "$4" = "$(setting "$1" WEB_IMAGE)" ]; }
 id_of() { sha256sum "$1" | cut -c1-12; }
 status() {   # state, the env file it's about, then words: newest wins
   local line
@@ -128,7 +171,7 @@ open(sys.argv[3], "w").write(attributes.get("demiurge-follow", ""))' "$body" "$r
     [ -s "$raw" ] || continue
     if grep -q '^ *CHANNEL="[^"]' "$raw"; then wait=300; else wait=3600; fi
     if ! resolve "$raw" "$next"; then
-      status failed "$raw" "couldn't look up the channel's release; $LOG on the VM says why"
+      status failed "$raw" "couldn't name its release's images by digest, or they changed; $LOG on the VM says why"
       continue
     fi
     exec 8>"$LOCK"

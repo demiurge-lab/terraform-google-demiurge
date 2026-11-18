@@ -11,19 +11,32 @@ locals {
   instance = "demiurge" # Convex's instance; its database is named after it
   lb       = !var.tunnel
   # A release (v…) pins the deployment; anything else names a channel the VM follows, resolving it itself (follow.sh).
-  channel = var.release != null && !can(regex("^v[0-9]", coalesce(var.release, "v0"))) ? var.release : null
-  pinned  = local.channel == null ? var.release : null
-  # A pinned release's images, from Demiurge's registry, unless images are named outright; a channel's come from the VM.
-  # Built here (build_here): the customer's own registry and channel; else Demiurge's.
+  channel       = var.release != null && !can(regex("^v[0-9]", coalesce(var.release, "v0"))) ? var.release : null
+  pinned        = local.channel == null ? var.release : null
   registry      = var.build_here ? "${var.region}-docker.pkg.dev/${var.project}/${local.name}" : var.image_registry
   channels      = var.build_here ? "gs://${var.project}-demiurge-channels/channels" : var.channels
-  harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness:${local.pinned}")
-  web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${local.registry}/demiurge-web:${local.pinned}")
+  releases      = var.build_here ? "" : var.releases
+  release       = one(data.google_storage_bucket_object_content.release[*].content)
+  pinned_by     = local.release == null ? { harness = ":${local.pinned}", web = ":${local.pinned}" } : { for image in ["harness", "web"] : image => "@${split("@", jsondecode(local.release)[image])[1]}" }
+  harness_image = var.harness_image != null ? var.harness_image : (local.pinned == null ? "" : "${local.registry}/demiurge-harness${local.pinned_by.harness}")
+  web_image     = var.web_image != null ? var.web_image : (local.pinned == null ? "" : "${local.registry}/demiurge-web${local.pinned_by.web}")
   services = ["compute.googleapis.com", "sqladmin.googleapis.com", "secretmanager.googleapis.com", "servicenetworking.googleapis.com",
-  "iap.googleapis.com", "artifactregistry.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com"]
+  "iap.googleapis.com", "artifactregistry.googleapis.com", "logging.googleapis.com", "monitoring.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "drive.googleapis.com", "dns.googleapis.com"]
 }
 
 data "google_client_config" "current" {}
+
+data "google_storage_bucket_object_content" "release" {
+  count  = local.pinned != null && local.releases != "" && (var.harness_image == null || var.web_image == null) ? 1 : 0
+  bucket = regex("^gs://([^/]+)/(.+)$", local.releases)[0]
+  name   = "${regex("^gs://([^/]+)/(.+)$", local.releases)[1]}/${local.pinned}/release.json"
+  lifecycle {
+    postcondition {
+      condition     = jsondecode(self.content).version == local.pinned && alltrue([for image in ["harness", "web"] : can(regex("@sha256:[0-9a-f]{64}$", jsondecode(self.content)[image]))])
+      error_message = "The release's release.json must name this release and each image by digest."
+    }
+  }
+}
 
 resource "google_project_service" "used" {
   for_each           = toset(local.services)
@@ -51,6 +64,14 @@ resource "google_compute_subnetwork" "main" {
   region                   = var.region
   ip_cidr_range            = "10.20.0.0/24"
   private_ip_google_access = true
+  dynamic "log_config" {
+    for_each = var.network_logs ? [1] : []
+    content {
+      aggregation_interval = "INTERVAL_5_MIN"
+      flow_sampling        = 0.5
+      metadata             = "INCLUDE_ALL_METADATA"
+    }
+  }
 }
 
 resource "google_compute_router" "main" {
@@ -65,6 +86,20 @@ resource "google_compute_router_nat" "main" {
   region                             = var.region
   nat_ip_allocate_option             = "AUTO_ONLY"
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
+  log_config {
+    enable = var.network_logs
+    filter = "ALL"
+  }
+}
+
+resource "google_dns_policy" "logging" {
+  count          = var.network_logs ? 1 : 0
+  name           = "${local.name}-logging"
+  enable_logging = true
+  networks {
+    network_url = google_compute_network.main.id
+  }
+  depends_on = [google_project_service.used]
 }
 
 # Only Google's load balancer and health checks reach the page and Convex; only IAP reaches SSH.
@@ -200,10 +235,16 @@ resource "google_project_iam_member" "vm" {
   member   = "serviceAccount:${google_service_account.vm.email}"
 }
 
-# demiurge-admin makes and reads its own secrets, all named demiurge-*, and no others.
+resource "google_project_iam_custom_role" "vm_secrets" {
+  role_id     = "demiurgeSecrets"
+  title       = "Demiurge's own secrets"
+  permissions = ["secretmanager.secrets.create", "secretmanager.secrets.get", "secretmanager.versions.access", "secretmanager.versions.add"]
+  depends_on  = [google_project_service.used]
+}
+
 resource "google_project_iam_member" "vm_secrets" {
   project = var.project
-  role    = "roles/secretmanager.admin"
+  role    = google_project_iam_custom_role.vm_secrets.name
   member  = "serviceAccount:${google_service_account.vm.email}"
   condition {
     title      = "demiurge secrets only"
@@ -297,6 +338,7 @@ resource "google_compute_instance" "main" {
       RELEASE="${local.pinned == null ? "" : local.pinned}"
       CHANNEL="${local.channel == null ? "" : local.channel}"
       CHANNELS="${local.channels}"
+      RELEASES="${local.releases}"
       IMAGE_REGISTRY="${local.registry}"
       HARNESS_IMAGE="${local.harness_image}"
       WEB_IMAGE="${local.web_image}"
@@ -307,6 +349,8 @@ resource "google_compute_instance" "main" {
       DB_HOST="cloudsql-proxy"
       DO_NOT_REQUIRE_SSL=1
       DB_USER="${google_sql_user.convex.name}"
+      VPC_SUBNET="${google_compute_subnetwork.main.ip_cidr_range}"
+      DB_RANGE="${google_compute_global_address.sql.address}/${google_compute_global_address.sql.prefix_length}"
       LOCAL_DB=0
       BIND="${var.tunnel ? "127.0.0.1" : "0.0.0.0"}"
       EXPORTS_BUCKET="${var.project}-demiurge-exports"
@@ -316,6 +360,7 @@ resource "google_compute_instance" "main" {
       OIDC_CLIENT_ID="${var.oidc == null ? "" : var.oidc.client_id}"
       SIGNUP="${try(var.oidc.open_signup, false) ? "open" : ""}"
       OIDC_TRUST_EMAIL="${try(var.oidc.trust_email, false) ? "1" : ""}"
+      SLACK_TEAMS="${join(",", var.slack_teams)}"
     ENV
   }
   metadata_startup_script = file("${path.module}/startup.sh")
@@ -437,11 +482,20 @@ resource "google_compute_managed_ssl_certificate" "main" {
   depends_on = [google_project_service.used]
 }
 
+resource "google_compute_ssl_policy" "main" {
+  count           = local.lb ? 1 : 0
+  name            = local.name
+  profile         = "MODERN"
+  min_tls_version = "TLS_1_2"
+  depends_on      = [google_project_service.used]
+}
+
 resource "google_compute_target_https_proxy" "main" {
   count            = local.lb ? 1 : 0
   name             = local.name
   url_map          = google_compute_url_map.main[0].id
   ssl_certificates = [google_compute_managed_ssl_certificate.main[0].id]
+  ssl_policy       = google_compute_ssl_policy.main[0].id
 }
 
 resource "google_compute_global_forwarding_rule" "https" {
@@ -530,14 +584,21 @@ resource "google_storage_bucket_iam_member" "builders" {
 
 # ---------- Convex's nightly exports
 
+locals {
+  export_days = 30
+}
+
 resource "google_storage_bucket" "exports" {
   name                        = "${var.project}-demiurge-exports"
   location                    = var.region
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
+  retention_policy {
+    retention_period = local.export_days * 86400
+  }
   lifecycle_rule {
     condition {
-      age = 30
+      age = local.export_days
     }
     action {
       type = "Delete"
@@ -547,7 +608,7 @@ resource "google_storage_bucket" "exports" {
 
 resource "google_storage_bucket_iam_member" "exports" {
   bucket = google_storage_bucket.exports.name
-  role   = "roles/storage.objectAdmin"
+  role   = "roles/storage.objectCreator"
   member = "serviceAccount:${google_service_account.vm.email}"
 }
 

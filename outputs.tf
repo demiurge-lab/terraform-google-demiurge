@@ -28,7 +28,7 @@ output "registry" {
 }
 
 output "vm_service_account" {
-  description = "Demiurge grants this read access to its registry; the VM waits for it on its first start."
+  description = "Demiurge grants this read access to its registry, and with a channel to its releases' release.json; the VM waits for it on its first start."
   value       = google_service_account.vm.email
 }
 

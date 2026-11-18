@@ -10,6 +10,40 @@ if ! command -v docker >/dev/null; then
   apt-get update -q && apt-get install -yq docker-ce docker-ce-cli containerd.io docker-compose-plugin
 fi
 
+if dpkg -s google-cloud-ops-agent >/dev/null 2>&1 || {
+  install -m 0755 -d /etc/apt/keyrings &&
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg -o /etc/apt/keyrings/google-cloud.asc &&
+    echo "deb [signed-by=/etc/apt/keyrings/google-cloud.asc] https://packages.cloud.google.com/apt google-cloud-ops-agent-$(. /etc/os-release && echo "$VERSION_CODENAME")-2 main" > /etc/apt/sources.list.d/google-cloud-ops-agent.list &&
+    apt-get update -q && apt-get install -yq google-cloud-ops-agent
+}; then
+  cat > /etc/google-cloud-ops-agent/config.yaml <<'YAML'
+logging:
+  receivers:
+    demiurge_egress:
+      type: systemd_journald
+  processors:
+    demiurge_egress:
+      type: exclude_logs
+      match_any:
+        - 'jsonPayload.MESSAGE !~ "^(DEMIURGE-EGRESS|Missed [0-9]+ kernel messages)"'
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: []
+      demiurge_egress:
+        receivers: [demiurge_egress]
+        processors: [demiurge_egress]
+metrics:
+  service:
+    pipelines:
+      default_pipeline:
+        receivers: []
+YAML
+  systemctl restart google-cloud-ops-agent || echo "the Ops Agent didn't start, so the intellects' connection log stays in this VM's journal" >&2
+else
+  echo "couldn't install the Ops Agent, so the intellects' connection log stays in this VM's journal" >&2
+fi
+
 # The data disk: formatted only the first time, mounted at /srv/demiurge.
 disk=/dev/disk/by-id/google-demiurge-data
 mkdir -p /srv/demiurge
@@ -36,9 +70,8 @@ chmod 755 /usr/local/lib/demiurge-follow.sh
 target=$(mktemp) resolved=$(mktemp)
 metadata deployment-env > "$target"
 if [ ! -f /srv/demiurge/.initialized ] || [ ! -f /srv/demiurge/deployment.env ]; then
-  # A channel is looked up in Demiurge's bucket, which a new deployment waits to be granted, as with its images.
   until resolve "$target" "$resolved"; do
-    echo "waiting to read the channel's release: Demiurge grants $(metadata ../service-accounts/default/email 2>/dev/null || echo "this VM's service account") access"
+    echo "waiting to name the release's images by digest (/srv/demiurge/follow.log says why): Demiurge grants $(metadata ../service-accounts/default/email 2>/dev/null || echo "this VM's service account") access"
     sleep 30
   done
   install -m 600 "$resolved" /srv/demiurge/deployment.env
@@ -109,11 +142,15 @@ systemctl daemon-reload
 systemctl enable --now demiurge-export.timer
 [ ! -f /etc/systemd/system/demiurge-tunnel.service ] || systemctl enable --now demiurge-tunnel.service
 
-# Started only once set up: `demiurge-admin init` makes the keys the services need.
+up_failed_with=0
 if [ -f /srv/demiurge/.initialized ]; then
-  DEPLOY_DIR=/srv/demiurge demiurge-admin up
+  DEPLOY_DIR=/srv/demiurge demiurge-admin up || up_failed_with=$?
 else
   cp /srv/demiurge/deployment.env /srv/demiurge/released.env
 fi
 flock -u 9
 systemctl start demiurge-follow.service
+if [ "$up_failed_with" != 0 ]; then
+  echo "demiurge-admin up failed (exit $up_failed_with): the follower is running and takes the next release" >&2
+  exit "$up_failed_with"
+fi
