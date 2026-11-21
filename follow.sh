@@ -115,6 +115,23 @@ fetch_kit() {
   ln -sf /opt/demiurge/infra/admin/demiurge-admin /usr/local/bin/demiurge-admin || return 1
 }
 
+images_of() {
+  # shellcheck source=/dev/null
+  (set -a; . "$1"; set +a; echo "$HARNESS_IMAGE"; echo "$WEB_IMAGE") 2>/dev/null || true
+}
+
+tidy() {
+  local keep ref repo id
+  keep=$({ images_of "$DIR/deployment.env"; images_of "$DIR/previous.env"; } | while read -r ref; do
+    docker image inspect --format '{{.Id}}' "$ref" 2>/dev/null || true
+  done)
+  for repo in $(images_of "$DIR/deployment.env" | sed 's/@.*//'); do
+    for id in $(docker image ls --no-trunc --quiet "$repo"); do
+      grep -qxF "$id" <<<"$keep" || docker image rm "$id" >/dev/null 2>&1 || true
+    done
+  done
+}
+
 run_release() { fetch_kit "$DIR/deployment.env" >> "$LOG" 2>&1 && DEPLOY_DIR=$DIR demiurge-admin release >> "$LOG" 2>&1; }
 
 move() { moving "$@"; rm -f "$DIR/moving"; }
@@ -129,6 +146,7 @@ moving() {   # onto the env file given: the one Terraform set
   if run_release; then
     cp "$DIR/deployment.env" "$DIR/released.env"
     status released "$next" "$name"
+    tidy || true
     return
   fi
   cp "$next" "$DIR/failed.env"
